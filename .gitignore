@@ -1,0 +1,25 @@
+# Environment & secrets
+.env
+credentials.json
+token.json
+
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database
+outreach.db
+
+# Logs
+logs/
+
+# Exported data
+*.csv
+
+# Playwright browser profile
+.playwright_profile/
