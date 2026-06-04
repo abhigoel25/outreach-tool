@@ -23,3 +23,6 @@ logs/
 
 # Playwright browser profile
 .playwright_profile/
+
+outreach.db-shm
+outreach.db-wal

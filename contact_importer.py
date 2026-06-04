@@ -165,9 +165,11 @@ def import_apollo(filepath: str) -> int:
         first = str(row.get("First Name", "") or "").strip()
         last  = str(row.get("Last Name", "") or "").strip()
         email = str(row.get("Email", "") or "").strip()
-        company = str(row.get("Company", "") or "").strip()
+        # Handle both legacy "Company" and Apollo standard "Company Name"
+        company = str(row.get("Company Name", row.get("Company", "")) or "").strip()
         role    = str(row.get("Title", "") or "").strip()
-        linkedin_url = str(row.get("LinkedIn URL", "") or "").strip()
+        # Handle both legacy "LinkedIn URL" and Apollo standard "Person Linkedin Url"
+        linkedin_url = str(row.get("Person Linkedin Url", row.get("LinkedIn URL", "")) or "").strip()
 
         if not first or not email or "@" not in email:
             continue

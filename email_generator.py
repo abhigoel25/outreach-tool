@@ -38,7 +38,7 @@ _COLUMBIA_TEMPLATES = [
             "I came across your profile and saw you're a fellow Lion now at {company} as {role}. "
             "I'm a CS student at Columbia Engineering (SEAS, Class of '28) and I'd love to hear about your path and what your work at {company} is like. "
             "Would you be open to a quick 15-20 minute chat sometime?\n\n"
-            "Thanks,\nAbhi Goel\nColumbia Engineering (SEAS) '28\nabhinavgoel225@gmail.com"
+            "Thanks,\nhttps://abhigoel25.github.io/abhiportfolio/ | https://www.linkedin.com/in/abhinav-goel-041ba8266/\nAbhi Goel\nColumbia Engineering (SEAS) '28\nabhinavgoel225@gmail.com"
         ),
     ),
     (
@@ -48,7 +48,7 @@ _COLUMBIA_TEMPLATES = [
             "I'm a CS student at Columbia Engineering (SEAS, Class of '28) and found your profile while looking at what alumni are building in tech. "
             "Your work as {role} at {company} sounds interesting and I'd love to learn more about it. "
             "Would you have 15-20 minutes for a quick chat?\n\n"
-            "Best,\nAbhi Goel\nColumbia SEAS '28 | abhinavgoel225@gmail.com"
+            "Best,\nhttps://abhigoel25.github.io/abhiportfolio/ | https://www.linkedin.com/in/abhinav-goel-041ba8266/\nAbhi Goel\nColumbia SEAS '28 | abhinavgoel225@gmail.com"
         ),
     ),
     (
@@ -58,7 +58,7 @@ _COLUMBIA_TEMPLATES = [
             "I'm Abhi, a CS student at Columbia Engineering (SEAS, Class of '28). "
             "I've been exploring what alumni are doing in tech and your role at {company} caught my attention. "
             "I'd love to hear more about your experience there. Would you be open to a short 15-minute chat?\n\n"
-            "Appreciate it,\nAbhi Goel\nabhinavgoel225@gmail.com"
+            "Appreciate it,\nhttps://abhigoel25.github.io/abhiportfolio/ | https://www.linkedin.com/in/abhinav-goel-041ba8266/\nAbhi Goel\nabhinavgoel225@gmail.com"
         ),
     ),
 ]
@@ -71,7 +71,7 @@ _GENERAL_TEMPLATES = [
             "My name is Abhi, a CS student at Columbia Engineering (SEAS, Class of '28). I came across your profile and was "
             "genuinely interested in your work as {role} at {company}. "
             "Would you have 15-20 minutes for a casual chat about your path and what you're working on?\n\n"
-            "Thanks,\nAbhi Goel\nColumbia Engineering (SEAS) '28\nabhinavgoel225@gmail.com"
+            "Thanks,\nhttps://abhigoel25.github.io/abhiportfolio/ | https://www.linkedin.com/in/abhinav-goel-041ba8266/\nAbhi Goel\nColumbia Engineering (SEAS) '28\nabhinavgoel225@gmail.com"
         ),
     ),
     (
@@ -81,7 +81,7 @@ _GENERAL_TEMPLATES = [
             "I'm Abhi, a CS student at Columbia Engineering (SEAS). I found your profile and your work at {company} stood out to me. "
             "I'd love to hear about your experience and what you're building there. "
             "Would you be open to a quick 15-minute call?\n\n"
-            "Really appreciate it,\nAbhi Goel\nabhinavgoel225@gmail.com"
+            "Really appreciate it,\nhttps://abhigoel25.github.io/abhiportfolio/ | https://www.linkedin.com/in/abhinav-goel-041ba8266/\nAbhi Goel\nabhinavgoel225@gmail.com"
         ),
     ),
     (
@@ -91,7 +91,7 @@ _GENERAL_TEMPLATES = [
             "My name is Abhi Goel, a CS student at Columbia Engineering (SEAS). "
             "I came across your profile and was curious about your path to {role} at {company}. "
             "Would you be up for a 15-20 minute chat sometime?\n\n"
-            "Thanks so much,\nAbhi\nabhinavgoel225@gmail.com"
+            "Thanks so much,\nhttps://abhigoel25.github.io/abhiportfolio/ | https://www.linkedin.com/in/abhinav-goel-041ba8266/\nAbhi\nabhinavgoel225@gmail.com"
         ),
     ),
 ]
@@ -110,6 +110,17 @@ def generate_email(contact: dict) -> tuple:
     if ANTHROPIC_API_KEY:
         try:
             subject, body = _generate_with_claude(contact)
+            # Guard: if Claude returned a meta-prompt instead of a real subject, fall back
+            bad_subject = (
+                len(subject) > 80
+                or subject.lower().startswith("i need")
+                or subject.lower().startswith("could you")
+                or subject.lower().startswith("please provide")
+                or "?" in subject and len(subject) > 50
+            )
+            if bad_subject:
+                print(f"[email_gen] Claude returned bad subject, falling back to template")
+                raise ValueError("bad subject")
             return _strip_em_dashes(subject), _strip_em_dashes(body)
         except Exception as e:
             print(f"[email_gen] Claude API error, falling back to template: {e}")
@@ -158,6 +169,7 @@ IF NOT A COLUMBIA ALUM:
 
 - No em dashes. No "pick your brain", "leverage", "synergy", "I'm impressed".
 - Sign off (use this exact format, each item on its own line):
+https://abhigoel25.github.io/abhiportfolio/ | https://www.linkedin.com/in/abhinav-goel-041ba8266/
 Abhinav Goel
 Columbia Engineering (SEAS) '28
 abhinavgoel225@gmail.com
@@ -226,8 +238,8 @@ _LINKEDIN_NOTE_TEMPLATES = [
 ]
 
 _COLUMBIA_NOTE_TEMPLATES = [
-    "Hi {first_name}, fellow Lion here! I'm Abhinav, a CS student at Columbia SEAS ('28). I'd love to hear about your path and what you're working on at {company}. Would you be up for a quick chat?",
-    "Hi {first_name}! I'm Abhinav, a current CS student at Columbia ('28). Really cool to see what you've been building at {company}. Would love to grab 15 mins to hear about your experience there.",
+    "Hi {first_name}, I'm Abhinav, a CS student at Columbia Engineering (SEAS, Class of 2028). I saw you went to Columbia as well — curious about your path to {company}. Would you be up for a quick chat?",
+    "Hey {first_name}, I'm Abhinav, a CS student at Columbia SEAS (Class of 2028). Noticed you went to Columbia too, and wanted to reach out about your experience at {company}. Would love to chat for a few mins if you have time.",
 ]
 
 
@@ -263,9 +275,9 @@ Rules:
 - Tone: genuine, casual college-student voice. Not corporate. Not AI-sounding.
 - Never mention "junior", "sophomore", "freshman", or any class year label. Just say "CS student at Columbia Engineering (SEAS, Class of 2028)" — always use the full form, never shorten to just "Columbia".
 - The goal is eventually getting a 10-15 min chat and a referral. Don't say "referral". End with asking for a quick chat.
-- Never say: "pick your brain", "leverage", "synergy", "would love to connect", "looking forward to connecting", "hope to connect", "always cool to see", "cool to see", "doing interesting work", "doing great work", "doing big things", "Lions doing".
+- Never say: "pick your brain", "leverage", "synergy", "would love to connect", "looking forward to connecting", "hope to connect", "always cool to see", "cool to see", "doing interesting work", "doing great work", "doing big things", "Lions doing", "love seeing another Columbia", "great to see a fellow", "awesome to see another".
 - No em dashes. No exclamation points after every sentence.
-- If Columbia alum: mention the shared Columbia connection briefly.
+- If Columbia alum: mention the shared Columbia connection simply and matter-of-factly, e.g. "I saw you went to Columbia as well" or "noticed you went to Columbia too". Do NOT say anything like "love seeing another Columbia person" or compliment them on their work as part of the Columbia mention.
 - Sign off: just "Abhinav". No last name, no email.
 - Output: just the note. No labels, no quotes."""
 
