@@ -385,61 +385,115 @@ async def _try_send_message(
     page: Page,
     profile_url: str,
     contact: dict,
+    note: str,
     dry_run: bool = False,
 ) -> tuple[bool, str]:
     """
     Send a LinkedIn direct message or InMail when Connect is unavailable.
     Used as a fallback for priority >= 4 contacts.
+    `note` is the already-generated connection note — reused as the message body
+    to avoid a second Claude API call.
     Returns (success: bool, reason: str).
     """
-    from email_generator import generate_email
-    _, body = generate_email(contact)
-    body = body[:1900]  # InMail body cap
+    body = note[:1900]  # InMail body cap
 
     if dry_run:
         return True, "dry_run_message"
 
-    # Navigate to profile if we've drifted away
-    if profile_url not in page.url:
-        try:
-            await page.goto(profile_url, wait_until="domcontentloaded", timeout=30_000)
-            await asyncio.sleep(random.uniform(2.0, 3.0))
-        except PwTimeout:
-            return False, "timeout_loading_profile_for_message"
+    # Always re-navigate: the page state after a failed Connect attempt is dirty
+    # (More dropdown may be open, JS mutations applied, etc.).
+    try:
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(random.uniform(2.5, 3.5))
+    except PwTimeout:
+        log.info("  [msg_fallback] timeout navigating to profile")
+        return False, "timeout_loading_profile_for_message"
 
-    # Click the Message button on the profile
+    # Scroll to top so sticky mini-header collapses (same requirement as Connect)
+    await page.evaluate("window.scrollTo(0, 0)")
+    await asyncio.sleep(1.2)
+
+    # Derive person name for scoping (same as connect logic)
+    person_name = await page.evaluate("""() => {
+        const title = document.title.split('|')[0].trim();
+        return title.split(' - ')[0].trim() || null;
+    }""")
+    first_name = (person_name or '').split()[0].lower() if person_name else ''
+    log.info(f"  [msg_fallback] profile name: {person_name!r}")
+
+    # Find Message button scoped to the profile action area.
+    # Strategy: look for the Follow button for this person, then find a
+    # Message button in the same action container (avoids nav bar matches).
     msg_clicked = False
-    for sel in [
-        "button[aria-label*='Message']",
-        "button:has-text('Message')",
-        "a:has-text('Message')",
-    ]:
-        try:
-            btn = page.locator(sel).first
-            await btn.wait_for(state="visible", timeout=4_000)
-            await btn.click()
-            msg_clicked = True
-            break
-        except Exception:
-            pass
+
+    msg_clicked = await page.evaluate("""(firstName) => {
+        // Try to find Message button near a Follow button for this person
+        const allBtns = [...document.querySelectorAll('button')];
+        const followIdx = firstName
+            ? allBtns.findIndex(b => {
+                const lbl = (b.getAttribute('aria-label') || '').toLowerCase();
+                return lbl.startsWith('follow') && lbl.includes(firstName);
+              })
+            : -1;
+
+        let msgBtn = null;
+
+        if (followIdx !== -1) {
+            // Walk up to action container
+            let c = allBtns[followIdx].parentElement;
+            for (let i = 0; i < 8; i++) {
+                if (!c) break;
+                const btns = [...c.querySelectorAll('button')];
+                if (btns.length >= 2 && btns.length <= 8) {
+                    msgBtn = btns.find(b => {
+                        const txt = (b.innerText || b.textContent || '').trim();
+                        const lbl = (b.getAttribute('aria-label') || '').toLowerCase();
+                        return txt === 'Message' || lbl === 'message' || lbl.startsWith('message ');
+                    });
+                    if (msgBtn) break;
+                }
+                c = c.parentElement;
+            }
+        }
+
+        // Broader fallback: first visible Message button on the page (not a link)
+        if (!msgBtn) {
+            msgBtn = allBtns.find(b => {
+                const txt = (b.innerText || b.textContent || '').trim();
+                const lbl = (b.getAttribute('aria-label') || '').toLowerCase();
+                const rc  = b.getBoundingClientRect();
+                const vis = rc.width > 0 && rc.height > 0;
+                return vis && (txt === 'Message' || lbl === 'message' || lbl.startsWith('message '));
+            });
+        }
+
+        if (!msgBtn) return false;
+        msgBtn.click();
+        return true;
+    }""", first_name)
 
     if not msg_clicked:
+        log.info("  [msg_fallback] message_button_not_found")
         return False, "message_button_not_found"
 
+    log.info("  [msg_fallback] Message button clicked")
     await asyncio.sleep(random.uniform(1.5, 2.5))
 
     # Find the compose window (overlay for direct message, dialog for InMail)
     compose = None
-    for cloc in ["[role='dialog']", ".msg-overlay-conversation-bubble", ".msg-form"]:
+    for cloc in ["[role='dialog']", ".msg-overlay-conversation-bubble", ".msg-form",
+                 ".msg-overlay-bubble-header", "form.msg-form"]:
         loc = page.locator(cloc)
         try:
             await loc.first.wait_for(state="visible", timeout=4_000)
             compose = loc.first
+            log.info(f"  [msg_fallback] compose window found ({cloc})")
             break
         except Exception:
             pass
 
     if compose is None:
+        log.info("  [msg_fallback] compose_window_not_found")
         return False, "compose_window_not_found"
 
     # Fill Subject field if present (InMail only)
@@ -448,8 +502,10 @@ async def _try_send_message(
             "input[placeholder*='Subject'], input[name='subject'], input[aria-label*='Subject']"
         ).first
         await subj_loc.wait_for(state="visible", timeout=2_000)
-        subject, _ = generate_email(contact)
-        await subj_loc.fill(subject[:200])
+        # Use first line of the note as subject
+        subject_text = note.split('\n')[0][:200]
+        await subj_loc.fill(subject_text)
+        log.info(f"  [msg_fallback] subject filled")
     except Exception:
         pass  # Regular messages have no subject
 
@@ -468,11 +524,13 @@ async def _try_send_message(
             await page.keyboard.press("Control+a")
             await page.keyboard.type(body)
             msg_filled = True
+            log.info(f"  [msg_fallback] body filled ({sel})")
             break
         except Exception:
             pass
 
     if not msg_filled:
+        log.info("  [msg_fallback] message_body_not_filled")
         return False, "message_body_not_filled"
 
     await asyncio.sleep(0.5)
@@ -488,10 +546,12 @@ async def _try_send_message(
             btn = compose.locator(sel).first
             await btn.wait_for(state="visible", timeout=4_000)
             await btn.click()
+            log.info("  [msg_fallback] Send clicked — messaged!")
             return True, "messaged"
         except Exception:
             pass
 
+    log.info("  [msg_fallback] message_send_failed (send button not found)")
     return False, "message_send_failed"
 
 
@@ -602,7 +662,7 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
                 priority = int(contact.get("priority") or 0)
                 if priority >= 4:
                     log.info(f"  [linkedin] Connect unavailable ({reason}) — trying message fallback...")
-                    ok, reason = await _try_send_message(page, url, contact, dry_run=False)
+                    ok, reason = await _try_send_message(page, url, contact, note=note, dry_run=False)
 
             # --- Record result ---
             if ok:
