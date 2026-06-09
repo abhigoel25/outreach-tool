@@ -517,15 +517,24 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
         log.info(f"[linkedin] Daily limit ({cap}) already reached. Come back tomorrow!")
         return
 
-    contacts = get_pending_linkedin_contacts(limit=remaining)
+    # Fetch a buffer larger than remaining so stale skips don't eat into the quota.
+    # We re-fetch in chunks; already-processed contacts are excluded automatically
+    # because mark_linkedin_sent/failed update their status before the next fetch.
+    FETCH_BATCH = remaining + 20
+    contacts = get_pending_linkedin_contacts(limit=FETCH_BATCH)
     if not contacts:
         log.info("[linkedin] No contacts with LinkedIn URLs pending.")
         return
 
-    log.info(f"{'[DRY RUN] ' if dry_run else ''}[linkedin] Sending {len(contacts)} connection requests "
+    log.info(f"{'[DRY RUN] ' if dry_run else ''}[linkedin] Target: {remaining} new sends "
              f"(limit: {cap}/day, sent today: {sent_today})")
 
     PLAYWRIGHT_PROFILE.mkdir(parents=True, exist_ok=True)
+
+    # Track IDs we've already touched this run to avoid re-fetching them mid-loop
+    seen_ids: set[int] = set()
+    actual_sends = 0   # real new connection requests / messages sent this run
+    i = 0              # display counter
 
     async with async_playwright() as pw:
         context: BrowserContext = await pw.chromium.launch_persistent_context(
@@ -542,13 +551,26 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
             await context.close()
             return
 
-        for i, contact in enumerate(contacts, 1):
+        while actual_sends < remaining:
+            # Replenish contacts list if exhausted
+            if not contacts:
+                contacts = get_pending_linkedin_contacts(limit=FETCH_BATCH)
+                # Filter out any we've already touched this run
+                contacts = [c for c in contacts if c["id"] not in seen_ids]
+                if not contacts:
+                    log.info("[linkedin] No more pending contacts available.")
+                    break
+
+            contact = contacts.pop(0)
+            seen_ids.add(contact["id"])
+            i += 1
+
             name = f"{contact['first_name']} {contact.get('last_name', '')}"
             co   = contact.get("company", "?")
             url  = contact.get("linkedin_url", "")
 
             if not url:
-                log.info(f"[{i}/{len(contacts)}] {name} — no LinkedIn URL, skipping")
+                log.info(f"[{i}] {name} — no LinkedIn URL, skipping")
                 mark_linkedin_failed(contact["id"], "no_url")
                 continue
 
@@ -556,11 +578,12 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
             char_count = len(note)
             role = contact.get("role") or "(no role)"
 
-            log.info(f"[{i}/{len(contacts)}] {name} | {role} @ {co}")
+            log.info(f"[{i}] {name} | {role} @ {co}  (sends: {actual_sends}/{remaining})")
             log.info(f"  Note ({char_count}/300): {note}")
 
             if dry_run:
                 log.info("-" * 60)
+                actual_sends += 1
                 continue
 
             try:
@@ -583,6 +606,7 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
 
             # --- Record result ---
             if ok:
+                actual_sends += 1
                 if reason == "messaged":
                     mark_linkedin_messaged(contact["id"])
                     log.info(f"  Messaged! (InMail/direct)")
@@ -590,8 +614,9 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
                     mark_linkedin_sent(contact["id"])
                     log.info(f"  Sent!")
             elif original_reason in ("already_connected", "already_pending"):
+                # Stale DB entry — mark it off but don't count against today's quota
                 mark_linkedin_sent(contact["id"])
-                log.info(f"  Skipped ({original_reason})")
+                log.info(f"  Skipped ({original_reason}) — DB cleaned up, fetching replacement")
             else:
                 mark_linkedin_failed(contact["id"], reason)
                 log.info(f"  Failed: {reason}")
@@ -601,7 +626,7 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
 
         await context.close()
 
-    log.info("[linkedin] Batch complete.")
+    log.info(f"[linkedin] Batch complete. New sends this run: {actual_sends}/{remaining}")
 
 
 if __name__ == "__main__":
