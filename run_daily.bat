@@ -11,5 +11,6 @@ set PYTHON=%PROJECT_DIR%\.venv\Scripts\python.exe
 cd /d "%PROJECT_DIR%"
 
 echo [%DATE% %TIME%] Starting daily outreach...
-"%PYTHON%" run_daily.py --headless
+REM Run visibly so Columbia Duo MFA can be approved when the portal session expires.
+"%PYTHON%" run_daily.py
 echo [%DATE% %TIME%] Done.

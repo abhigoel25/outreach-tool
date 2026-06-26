@@ -6,11 +6,66 @@ Falls back to hand-written templates if no API key is set.
 
 import os
 import random
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+log = logging.getLogger(__name__)
+_CLAUDE_DISABLED_REASON = ""
+
+
+def _summarize_claude_error(exc: Exception) -> str:
+    """Return the useful Anthropic error detail without exposing credentials."""
+    status = getattr(exc, "status_code", None)
+    request_id = getattr(exc, "request_id", None)
+    body = getattr(exc, "body", None)
+
+    err_type = ""
+    message = getattr(exc, "message", "") or str(exc)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        err_type = err.get("type") or ""
+        message = err.get("message") or body.get("message") or message
+
+    parts = []
+    if status:
+        parts.append(f"status={status}")
+    if err_type:
+        parts.append(f"type={err_type}")
+    if message:
+        parts.append(message)
+    if request_id:
+        parts.append(f"request_id={request_id}")
+    return " | ".join(parts) or str(exc)
+
+
+def _should_disable_claude_for_run(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    message = (getattr(exc, "message", "") or str(exc)).lower()
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        message = f"{message} {err.get('type', '')} {err.get('message', '')}".lower()
+    return (
+        status in {400, 401, 402, 403}
+        or "credit balance" in message
+        or "billing" in message
+        or "api key" in message
+        or "permission" in message
+    )
+
+
+def _record_claude_failure(exc: Exception, context: str) -> None:
+    global _CLAUDE_DISABLED_REASON
+    summary = _summarize_claude_error(exc)
+    if _should_disable_claude_for_run(exc):
+        _CLAUDE_DISABLED_REASON = summary
+        log.warning("[email_gen] Claude disabled for this run while generating %s; using templates. %s", context, summary)
+    else:
+        log.warning("[email_gen] Claude error while generating %s; using template. %s", context, summary)
 
 # Rich background context injected into every Claude prompt
 _ABHI_CONTEXT = """
@@ -107,7 +162,7 @@ def generate_email(contact: dict) -> tuple:
     Generate (subject, body) for a contact.
     Uses Claude Haiku if API key available, otherwise falls back to templates.
     """
-    if ANTHROPIC_API_KEY:
+    if ANTHROPIC_API_KEY and not _CLAUDE_DISABLED_REASON:
         try:
             subject, body = _generate_with_claude(contact)
             # Guard: if Claude returned a meta-prompt instead of a real subject, fall back
@@ -119,11 +174,11 @@ def generate_email(contact: dict) -> tuple:
                 or "?" in subject and len(subject) > 50
             )
             if bad_subject:
-                print(f"[email_gen] Claude returned bad subject, falling back to template")
+                log.warning("[email_gen] Claude returned bad subject, falling back to template")
                 raise ValueError("bad subject")
             return _strip_em_dashes(subject), _strip_em_dashes(body)
         except Exception as e:
-            print(f"[email_gen] Claude API error, falling back to template: {e}")
+            _record_claude_failure(e, "email")
 
     subject, body = _generate_from_template(contact)
     return _strip_em_dashes(subject), _strip_em_dashes(body)
@@ -185,7 +240,7 @@ abhinavgoel225@gmail.com
     ).strip()
 
     response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=ANTHROPIC_MODEL,
         max_tokens=300,
         messages=[{"role": "user", "content": user}],
         system=system,
@@ -248,11 +303,11 @@ def generate_linkedin_note(contact: dict) -> str:
     Generate a LinkedIn connection request note (<= 300 chars).
     Uses Claude if available (for better personalization), otherwise falls back to templates.
     """
-    if ANTHROPIC_API_KEY:
+    if ANTHROPIC_API_KEY and not _CLAUDE_DISABLED_REASON:
         try:
             return _generate_note_with_claude(contact)
         except Exception as e:
-            print(f"[email_gen] Claude note error, using template: {e}")
+            _record_claude_failure(e, "LinkedIn note")
 
     return _generate_note_from_template(contact)
 
@@ -289,7 +344,7 @@ Rules:
     ).strip()
 
     response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=ANTHROPIC_MODEL,
         max_tokens=200,
         messages=[{"role": "user", "content": user}],
         system=system,

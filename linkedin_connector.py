@@ -104,6 +104,36 @@ async def _ensure_logged_in(page: Page) -> bool:
 # Core: send one connection request
 # ---------------------------------------------------------------------------
 
+async def _get_profile_name(page: Page) -> str:
+    """Extract the profile owner's name from a loaded LinkedIn profile."""
+    try:
+        h1 = page.locator("main h1, h1").first
+        await h1.wait_for(state="visible", timeout=8_000)
+        text = (await h1.inner_text()).strip()
+        if text and text.lower() != "linkedin":
+            return text
+    except Exception:
+        pass
+
+    try:
+        return await page.evaluate("""() => {
+            const candidates = [
+                document.querySelector('main h1'),
+                document.querySelector('h1'),
+                document.querySelector('.text-heading-xlarge'),
+            ].filter(Boolean);
+            for (const el of candidates) {
+                const text = (el.textContent || '').trim();
+                if (text && text.toLowerCase() !== 'linkedin') return text;
+            }
+            const title = document.title.split('|')[0].trim();
+            const name = title.split(' - ')[0].trim();
+            return name && name.toLowerCase() !== 'linkedin' ? name : '';
+        }""")
+    except Exception:
+        return ""
+
+
 async def send_connection_request(
     page: Page,
     profile_url: str,
@@ -139,12 +169,10 @@ async def send_connection_request(
     await page.evaluate("window.scrollTo(0, 0)")
     await asyncio.sleep(1.2)
 
-    # Get person's name from page title: "Name | LinkedIn" or "Name - Title | LinkedIn"
-    person_name = await page.evaluate("""() => {
-        const title = document.title.split('|')[0].trim();
-        return title.split(' - ')[0].trim() || null;
-    }""")
+    person_name = await _get_profile_name(page)
     log.info(f"    [linkedin] Profile name: {person_name!r}")
+    if not person_name:
+        return False, "profile_not_loaded"
     first_name = (person_name or '').split()[0].lower() if person_name else ''
 
     connect_clicked = False
@@ -206,7 +234,6 @@ async def send_connection_request(
                 }""")
                 log.info(f"    [linkedin] Clicked More (DOM adjacency + dispatchEvent)")
                 await asyncio.sleep(1.0)
-                await page.evaluate("document.querySelectorAll('[data-pw-click]').forEach(e => e.removeAttribute('data-pw-click'))")
 
                 for conn_sel in [
                     "[role='menu'] :text-is('Connect')",
@@ -244,6 +271,8 @@ async def send_connection_request(
                                 pass
                     except Exception:
                         pass
+
+                await page.evaluate("document.querySelectorAll('[data-pw-click]').forEach(e => e.removeAttribute('data-pw-click'))")
 
                 if not connect_clicked:
                     await page.keyboard.press("Escape")
@@ -302,6 +331,20 @@ async def send_connection_request(
         except Exception:
             await page.locator("label:has-text('Other')").first.click()
         await asyncio.sleep(0.8)
+        for next_sel in [
+            "button:has-text('Next')",
+            "button:has-text('Continue')",
+            "button[aria-label*='Next' i]",
+            "button[aria-label*='Continue' i]",
+        ]:
+            try:
+                next_btn = page.locator(next_sel).first
+                await next_btn.wait_for(state="visible", timeout=1_500)
+                await next_btn.click()
+                await asyncio.sleep(0.8)
+                break
+            except Exception:
+                pass
     except Exception:
         pass  # No "How do you know?" step — modal goes straight to the note form
 
@@ -371,6 +414,21 @@ async def send_connection_request(
             pass
 
     if not sent:
+        for modal_sel in ["[role='dialog']", ".artdeco-modal"]:
+            modal = page.locator(modal_sel).last
+            for sel in ["button:has-text('Send')", "button[aria-label*='Send' i]"]:
+                try:
+                    btn = modal.locator(sel).first
+                    await btn.wait_for(state="visible", timeout=2_000)
+                    await btn.click()
+                    sent = True
+                    break
+                except Exception:
+                    pass
+            if sent:
+                break
+
+    if not sent:
         return False, "send_button_not_found"
 
     await asyncio.sleep(random.uniform(1.5, 2.5))
@@ -414,12 +472,11 @@ async def _try_send_message(
     await asyncio.sleep(1.2)
 
     # Derive person name for scoping (same as connect logic)
-    person_name = await page.evaluate("""() => {
-        const title = document.title.split('|')[0].trim();
-        return title.split(' - ')[0].trim() || null;
-    }""")
+    person_name = await _get_profile_name(page)
     first_name = (person_name or '').split()[0].lower() if person_name else ''
     log.info(f"  [msg_fallback] profile name: {person_name!r}")
+    if not person_name:
+        return False, "profile_not_loaded"
 
     # Find Message button scoped to the profile action area.
     # Strategy: look for the Follow button for this person, then find a
@@ -665,6 +722,15 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
                     ok, reason = await _try_send_message(page, url, contact, note=note, dry_run=False)
 
             # --- Record result ---
+            TRANSIENT_REASONS = {
+                "timeout_loading_profile",
+                "timeout_loading_profile_for_message",
+                "profile_not_loaded",
+                "modal_not_appeared",
+                "send_button_not_found",
+                "compose_window_not_found",
+                "message_send_failed",
+            }
             if ok:
                 actual_sends += 1
                 if reason == "messaged":
@@ -677,6 +743,8 @@ async def run_batch(limit: int = None, dry_run: bool = False, headless: bool = F
                 # Stale DB entry — mark it off but don't count against today's quota
                 mark_linkedin_sent(contact["id"])
                 log.info(f"  Skipped ({original_reason}) — DB cleaned up, fetching replacement")
+            elif reason in TRANSIENT_REASONS or original_reason in TRANSIENT_REASONS:
+                log.info(f"  Transient failure: {reason} (left pending for a future retry)")
             else:
                 mark_linkedin_failed(contact["id"], reason)
                 log.info(f"  Failed: {reason}")
